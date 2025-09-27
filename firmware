@@ -1,0 +1,41 @@
+// ==== ESP8266 Serial-only Relay Control (no Wi-Fi, no extra logs) ====
+// Board: NodeMCU 1.0 / Wemos D1 mini (ESP8266)
+// Baud: 115200  (파이썬과 반드시 일치)
+
+#define RELAY_PIN D1     // 릴레이 IN이 연결된 핀 (보드에 따라 D1/D2/D5 등)
+#define ACTIVE_LOW 0     // 대부분의 릴레이 모듈: LOW면 ON
+
+void setRelay(bool on) {
+  if (ACTIVE_LOW) digitalWrite(RELAY_PIN, on ? LOW : HIGH);
+  else            digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+}
+
+void setup() {
+  pinMode(RELAY_PIN, OUTPUT);
+  setRelay(false);                 // 기본 OFF
+  Serial.begin(115200);
+  Serial.setTimeout(50);
+
+  // 완전 침묵 모드 (SDK/디버그 로그 차단)
+  Serial.setDebugOutput(false);
+}
+
+void loop() {
+  if (!Serial.available()) return;
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim(); cmd.toLowerCase();
+
+  if (cmd == "on") {
+    setRelay(true);
+    Serial.println("OK ON");
+  } else if (cmd == "off") {
+    setRelay(false);
+    Serial.println("OK OFF");
+  } else if (cmd == "status") {
+    bool on = (ACTIVE_LOW ? digitalRead(RELAY_PIN)==LOW : digitalRead(RELAY_PIN)==HIGH);
+    Serial.println(on ? "ON" : "OFF");
+  } else {
+    Serial.println("ERR use: on/off/status");
+  }
+}
