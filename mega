@@ -1,0 +1,81 @@
+// Mega 2560 + IR Break Beam (Receiver = open-collector → INPUT_PULLUP)
+// D2 = Beam1, D3 = Beam2 (optional)
+// Serial: 115200, JSON Lines: hello / edge / level / hb
+
+const uint8_t BEAM1_PIN = 2;  // INT4
+const uint8_t BEAM2_PIN = 3;  // INT5 (optional)
+
+volatile int raw1 = HIGH, raw2 = HIGH;
+volatile unsigned long lastIsr1 = 0, lastIsr2 = 0;
+
+unsigned long DEBOUNCE_MS    = 5;     // host command로 변경 가능
+unsigned long HEARTBEAT_MS   = 300;  // "
+unsigned long LEVEL_BCAST_MS = 400;   // 주기 상태 브로드캐스트(옵션)
+
+void isr1() {
+  unsigned long now = millis();
+  if (now - lastIsr1 >= DEBOUNCE_MS) { raw1 = digitalRead(BEAM1_PIN); lastIsr1 = now; }
+}
+void isr2() {
+  unsigned long now = millis();
+  if (now - lastIsr2 >= DEBOUNCE_MS) { raw2 = digitalRead(BEAM2_PIN); lastIsr2 = now; }
+}
+
+void setup() {
+  pinMode(BEAM1_PIN, INPUT_PULLUP);
+  pinMode(BEAM2_PIN, INPUT_PULLUP); // 두 번째 빔 미사용이면 연결 안 해도 됨
+
+  attachInterrupt(digitalPinToInterrupt(BEAM1_PIN), isr1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BEAM2_PIN), isr2, CHANGE);
+
+  Serial.begin(115200);
+  Serial.println("{\"event\":\"hello\",\"board\":\"mega2560\",\"ver\":\"1.0\","
+                 "\"schema\":\"edge/level/hb\",\"baud\":115200}");
+}
+
+void loop() {
+  static int prev1 = HIGH, prev2 = HIGH;
+  static unsigned long lastLevel = 0, lastHb = 0;
+  unsigned long now = millis();
+
+  // edge 즉시 보고
+  if (raw1 != prev1) {
+    prev1 = raw1;
+    Serial.print("{\"event\":\"edge\",\"t\":"); Serial.print(now);
+    Serial.print(",\"ch\":1,\"blocked\":"); Serial.print(prev1 == LOW ? 1 : 0);
+    Serial.println("}");
+  }
+  if (raw2 != prev2) {
+    prev2 = raw2;
+    Serial.print("{\"event\":\"edge\",\"t\":"); Serial.print(now);
+    Serial.print(",\"ch\":2,\"blocked\":"); Serial.print(prev2 == LOW ? 1 : 0);
+    Serial.println("}");
+  }
+
+  // 주기 상태(옵션)
+  if (now - lastLevel >= LEVEL_BCAST_MS) {
+    lastLevel = now;
+    Serial.print("{\"event\":\"level\",\"t\":"); Serial.print(now);
+    Serial.print(",\"ch1\":"); Serial.print(prev1 == LOW ? 1 : 0);
+    Serial.print(",\"ch2\":"); Serial.print(prev2 == LOW ? 1 : 0);
+    Serial.println("}");
+  }
+
+  // heartbeat
+  if (now - lastHb >= HEARTBEAT_MS) {
+    lastHb = now;
+    Serial.print("{\"event\":\"hb\",\"t\":"); Serial.print(now); Serial.println("}");
+  }
+
+  // 간단한 설정 명령 (개발 편의)
+  if (Serial.available()) {
+    String line = Serial.readStringUntil('\n'); line.trim();
+    if (line.startsWith("CMD HB ")) {
+      HEARTBEAT_MS = max(100UL, (unsigned long)line.substring(7).toInt());
+      Serial.print("{\"event\":\"ack\",\"hb\":"); Serial.print(HEARTBEAT_MS); Serial.println("}");
+    } else if (line.startsWith("CMD DB ")) {
+      DEBOUNCE_MS  = max(1UL, (unsigned long)line.substring(7).toInt());
+      Serial.print("{\"event\":\"ack\",\"db\":"); Serial.print(DEBOUNCE_MS); Serial.println("}");
+    }
+  }
+}
