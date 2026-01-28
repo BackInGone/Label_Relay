@@ -1,63 +1,163 @@
-// Mega 2560 + IR Break Beam (Receiver = open-collector → INPUT_PULLUP)
-// D2 = Beam1, D3 = Beam2 (optional)
-// Serial: 115200, JSON Lines: hello / edge / level / hb
+// Mega 2560 + IR Break Beam (open-collector -> INPUT_PULLUP)
+// D2 = Beam1, D3 = Beam2
+// Serial: 115200, JSON lines: hello / edge / level / hb
+// Design: ISR = snapshot only, loop = stable debounce (pending->stable)
 
 const uint8_t BEAM1_PIN = 2;  // INT4
-const uint8_t BEAM2_PIN = 3;  // INT5 (optional)
+const uint8_t BEAM2_PIN = 3;  // INT5
 
-volatile int raw1 = HIGH, raw2 = HIGH;
-volatile unsigned long lastIsr1 = 0, lastIsr2 = 0;
+unsigned long DEBOUNCE_MS    = 5;    // stable confirm time
+unsigned long HEARTBEAT_MS   = 300;
+unsigned long LEVEL_BCAST_MS = 400;
 
-unsigned long DEBOUNCE_MS    = 5;     // host command로 변경 가능
-unsigned long HEARTBEAT_MS   = 300;  // "
-unsigned long LEVEL_BCAST_MS = 400;   // 주기 상태 브로드캐스트(옵션)
+// ISR snapshots
+volatile uint8_t isr_state1 = HIGH;
+volatile uint8_t isr_state2 = HIGH;
+volatile unsigned long isr_lastChange1 = 0;
+volatile unsigned long isr_lastChange2 = 0;
 
-void isr1() {
+// ---------- Stable debounce state ----------
+struct StableChannel {
+  uint8_t stable;            // confirmed stable state
+  uint8_t pending;           // latest observed state
+  unsigned long pendingSince; // time when pending last changed
+};
+
+StableChannel ch1 = { HIGH, HIGH, 0 };
+StableChannel ch2 = { HIGH, HIGH, 0 };
+
+// ---------- ISR (minimal) ----------
+static inline void isr_common(uint8_t pin, volatile uint8_t& st, volatile unsigned long& t) {
   unsigned long now = millis();
-  if (now - lastIsr1 >= DEBOUNCE_MS) { raw1 = digitalRead(BEAM1_PIN); lastIsr1 = now; }
+  st = (uint8_t)digitalRead(pin);  // snapshot
+  t  = now;                        // last change time
 }
-void isr2() {
-  unsigned long now = millis();
-  if (now - lastIsr2 >= DEBOUNCE_MS) { raw2 = digitalRead(BEAM2_PIN); lastIsr2 = now; }
+void isr1() { isr_common(BEAM1_PIN, isr_state1, isr_lastChange1); }
+void isr2() { isr_common(BEAM2_PIN, isr_state2, isr_lastChange2); }
+
+// ---------- Non-blocking serial command parser (no String) ----------
+static char cmdBuf[64];
+static uint8_t cmdLen = 0;
+
+static void handleCommandLine(const char* line) {
+  // "CMD HB <num>" or "CMD DB <num>"
+  if (strncmp(line, "CMD HB ", 7) == 0) {
+    unsigned long v = strtoul(line + 7, nullptr, 10);
+    HEARTBEAT_MS = max(100UL, v);
+    Serial.print("{\"event\":\"ack\",\"hb\":"); Serial.print(HEARTBEAT_MS); Serial.println("}");
+  } else if (strncmp(line, "CMD DB ", 7) == 0) {
+    unsigned long v = strtoul(line + 7, nullptr, 10);
+    DEBOUNCE_MS = max(1UL, v);
+    Serial.print("{\"event\":\"ack\",\"db\":"); Serial.print(DEBOUNCE_MS); Serial.println("}");
+  }
+}
+
+static void pollSerialCommandsNonBlocking() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+
+    if (c == '\n') {
+      cmdBuf[cmdLen] = '\0';
+      // rtrim
+      while (cmdLen > 0 && (cmdBuf[cmdLen - 1] == ' ' || cmdBuf[cmdLen - 1] == '\t')) {
+        cmdBuf[--cmdLen] = '\0';
+      }
+      if (cmdLen > 0) handleCommandLine(cmdBuf);
+      cmdLen = 0;
+      continue;
+    }
+
+    if (cmdLen < sizeof(cmdBuf) - 1) {
+      cmdBuf[cmdLen++] = c;
+    } else {
+      // overflow -> drop
+      cmdLen = 0;
+    }
+  }
+}
+
+// ---------- Stable update ----------
+static void updateStableFromIsr(StableChannel& ch, uint8_t isrState, unsigned long isrTime, unsigned long now) {
+  // pending 갱신
+  if (isrState != ch.pending) {
+    ch.pending = isrState;
+    ch.pendingSince = isrTime;
+  }
+  // stable 확정
+  if (ch.pending != ch.stable) {
+    if (now - ch.pendingSince >= DEBOUNCE_MS) {
+      ch.stable = ch.pending;
+    }
+  }
+}
+
+static void emitEdge(uint8_t channel, unsigned long now, uint8_t stableState) {
+  Serial.print("{\"event\":\"edge\",\"t\":"); Serial.print(now);
+  Serial.print(",\"ch\":"); Serial.print(channel);
+  Serial.print(",\"blocked\":"); Serial.print(stableState == LOW ? 1 : 0);
+  Serial.println("}");
 }
 
 void setup() {
   pinMode(BEAM1_PIN, INPUT_PULLUP);
-  pinMode(BEAM2_PIN, INPUT_PULLUP); // 두 번째 빔 미사용이면 연결 안 해도 됨
+  pinMode(BEAM2_PIN, INPUT_PULLUP);
+
+  // init snapshot
+  isr_state1 = (uint8_t)digitalRead(BEAM1_PIN);
+  isr_state2 = (uint8_t)digitalRead(BEAM2_PIN);
+  isr_lastChange1 = millis();
+  isr_lastChange2 = millis();
+
+  ch1.stable = ch1.pending = isr_state1;
+  ch2.stable = ch2.pending = isr_state2;
+  ch1.pendingSince = isr_lastChange1;
+  ch2.pendingSince = isr_lastChange2;
 
   attachInterrupt(digitalPinToInterrupt(BEAM1_PIN), isr1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(BEAM2_PIN), isr2, CHANGE);
 
   Serial.begin(115200);
-  Serial.println("{\"event\":\"hello\",\"board\":\"mega2560\",\"ver\":\"1.0\","
-                 "\"schema\":\"edge/level/hb\",\"baud\":115200}");
+  Serial.println("{\"event\":\"hello\",\"board\":\"mega2560\",\"ver\":\"1.1\",\"schema\":\"edge/level/hb\",\"baud\":115200}");
 }
 
 void loop() {
-  static int prev1 = HIGH, prev2 = HIGH;
+  static uint8_t prevStable1 = HIGH, prevStable2 = HIGH;
   static unsigned long lastLevel = 0, lastHb = 0;
+
   unsigned long now = millis();
 
-  // edge 즉시 보고
-  if (raw1 != prev1) {
-    prev1 = raw1;
-    Serial.print("{\"event\":\"edge\",\"t\":"); Serial.print(now);
-    Serial.print(",\"ch\":1,\"blocked\":"); Serial.print(prev1 == LOW ? 1 : 0);
-    Serial.println("}");
+  // atomic-ish copy (state=8bit ok, time=32bit -> protect)
+  uint8_t s1, s2;
+  unsigned long t1, t2;
+  noInterrupts();
+  s1 = isr_state1; t1 = isr_lastChange1;
+  s2 = isr_state2; t2 = isr_lastChange2;
+  interrupts();
+
+  updateStableFromIsr(ch1, s1, t1, now);
+  updateStableFromIsr(ch2, s2, t2, now);
+
+  // confirmed edge
+  if (ch1.stable != prevStable1) {
+    prevStable1 = ch1.stable;
+    emitEdge(1, now, prevStable1);
+
+    // === 기존 트리거 로직을 여기에 연결 ===
+    // if (prevStable1 == LOW) { triggerSomething(); }
   }
-  if (raw2 != prev2) {
-    prev2 = raw2;
-    Serial.print("{\"event\":\"edge\",\"t\":"); Serial.print(now);
-    Serial.print(",\"ch\":2,\"blocked\":"); Serial.print(prev2 == LOW ? 1 : 0);
-    Serial.println("}");
+  if (ch2.stable != prevStable2) {
+    prevStable2 = ch2.stable;
+    emitEdge(2, now, prevStable2);
+    // if (prevStable2 == LOW) { triggerSomething(); }
   }
 
-  // 주기 상태(옵션)
+  // periodic level
   if (now - lastLevel >= LEVEL_BCAST_MS) {
     lastLevel = now;
     Serial.print("{\"event\":\"level\",\"t\":"); Serial.print(now);
-    Serial.print(",\"ch1\":"); Serial.print(prev1 == LOW ? 1 : 0);
-    Serial.print(",\"ch2\":"); Serial.print(prev2 == LOW ? 1 : 0);
+    Serial.print(",\"ch1\":"); Serial.print(prevStable1 == LOW ? 1 : 0);
+    Serial.print(",\"ch2\":"); Serial.print(prevStable2 == LOW ? 1 : 0);
     Serial.println("}");
   }
 
@@ -67,15 +167,5 @@ void loop() {
     Serial.print("{\"event\":\"hb\",\"t\":"); Serial.print(now); Serial.println("}");
   }
 
-  // 간단한 설정 명령 (개발 편의)
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n'); line.trim();
-    if (line.startsWith("CMD HB ")) {
-      HEARTBEAT_MS = max(100UL, (unsigned long)line.substring(7).toInt());
-      Serial.print("{\"event\":\"ack\",\"hb\":"); Serial.print(HEARTBEAT_MS); Serial.println("}");
-    } else if (line.startsWith("CMD DB ")) {
-      DEBOUNCE_MS  = max(1UL, (unsigned long)line.substring(7).toInt());
-      Serial.print("{\"event\":\"ack\",\"db\":"); Serial.print(DEBOUNCE_MS); Serial.println("}");
-    }
-  }
+  pollSerialCommandsNonBlocking();
 }
