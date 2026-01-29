@@ -1,82 +1,81 @@
-// ESP8266 Serial-only Relay Control (robust, non-blocking, no Wi-Fi)
-#include <Arduino.h>
+ // ESP8266 Serial-only Relay Control (robust, non-blocking, no Wi-Fi)
+ // [FIX] Serial.begin() 후 안정화 delay 추가
+ #include <Arduino.h>
 
-#define RELAY_PIN D1
-#define ACTIVE_LOW 0
+ #define RELAY_PIN D1
+ #define ACTIVE_LOW 0
 
-static inline void setRelay(bool on) {
-  if (ACTIVE_LOW) digitalWrite(RELAY_PIN, on ? LOW : HIGH);
-  else            digitalWrite(RELAY_PIN, on ? HIGH : LOW);
-}
+ static inline void setRelay(bool on) {
+   if (ACTIVE_LOW) digitalWrite(RELAY_PIN, on ? LOW : HIGH);
+   else            digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+ }
 
-static inline bool getRelay() {
-  int v = digitalRead(RELAY_PIN);
-  return ACTIVE_LOW ? (v == LOW) : (v == HIGH);
-}
+ static inline bool getRelay() {
+   int v = digitalRead(RELAY_PIN);
+   return ACTIVE_LOW ? (v == LOW) : (v == HIGH);
+ }
 
-// Line buffer
-static char buf[32];
-static uint8_t len = 0;
+ // Line buffer
+ static char buf[32];
+ static uint8_t len = 0;
 
-static void reply(const char* s) {
-  // If you truly want "silent", comment these out.
-  Serial.println(s);
-}
+ static void reply(const char* s) {
+   Serial.println(s);
+ }
 
-static void handleLine(char* line) {
-  // trim left/right spaces
-  while (*line == ' ' || *line == '\t') line++;
-  char* end = line + strlen(line);
-  while (end > line && (end[-1] == ' ' || end[-1] == '\t')) *--end = '\0';
+ static void handleLine(char* line) {
+   // trim left/right spaces
+   while (*line == ' ' || *line == '\t') line++;
+   char* end = line + strlen(line);
+   while (end > line && (end[-1] == ' ' || end[-1] == '\t')) *--end = '\0';
 
-  // lowercase in-place
-  for (char* p = line; *p; ++p) {
-    if (*p >= 'A' && *p <= 'Z') *p = *p - 'A' + 'a';
-  }
+   // lowercase in-place
+   for (char* p = line; *p; ++p) {
+     if (*p >= 'A' && *p <= 'Z') *p = *p - 'A' + 'a';
+   }
 
-  if (strcmp(line, "on") == 0) {
-    setRelay(true);
-    reply("OK ON");
-  } else if (strcmp(line, "off") == 0) {
-    setRelay(false);
-    reply("OK OFF");
-  } else if (strcmp(line, "status") == 0) {
-    reply(getRelay() ? "ON" : "OFF");
-  } else if (line[0] == '\0') {
-    // ignore empty lines
-  } else {
-    reply("ERR use: on/off/status");
-  }
-}
+   if (strcmp(line, "on") == 0) {
+     setRelay(true);
+     reply("OK ON");
+   } else if (strcmp(line, "off") == 0) {
+     setRelay(false);
+     reply("OK OFF");
+   } else if (strcmp(line, "status") == 0) {
+     reply(getRelay() ? "ON" : "OFF");
+   } else if (line[0] == '\0') {
+     // ignore empty lines
+   } else {
+     reply("ERR use: on/off/status");
+   }
+ }
 
-void setup() {
-  pinMode(RELAY_PIN, OUTPUT);
-  setRelay(false);
+ void setup() {
+   pinMode(RELAY_PIN, OUTPUT);
+   setRelay(false);
 
-  Serial.begin(115200);
-  Serial.setDebugOutput(false);
+   Serial.begin(115200);
+   delay(100);           // [FIX] 시리얼 안정화 대기
+   Serial.println();     // [FIX] 부팅 쓰레기 문자 후 버퍼 클리어
+   Serial.setDebugOutput(false);
+ }
 
-  // Optional: reduce surprise boot logs further
-  // Serial.swap(); // only if you intentionally move UART pins (usually NOT needed)
-}
+ void loop() {
+   while (Serial.available() > 0) {
+     char c = (char)Serial.read();
+     if (c == '\r') continue;
 
-void loop() {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\r') continue;
+     if (c == '\n') {
+       buf[len] = '\0';
+       handleLine(buf);
+       len = 0;
+       continue;
+     }
 
-    if (c == '\n') {
-      buf[len] = '\0';
-      handleLine(buf);
-      len = 0;
-      continue;
-    }
-
-    if (len < sizeof(buf) - 1) {
-      buf[len++] = c;
-    } else {
-      // overflow: drop line to stay sane
-      len = 0;
-    }
-  }
-}
+     if (len < sizeof(buf) - 1) {
+       buf[len++] = c;
+     } else {
+       // overflow: drop line to stay sane
+       len = 0;
+     }
+   }
+ }
