@@ -1,0 +1,108 @@
+    // ESP8266 종합 테스트 펌웨어
+     // 1. LED 깜빡임 (펌웨어 실행 확인)
+     // 2. 시리얼 출력 (TX 확인)
+     // 3. 시리얼 입력 (RX 확인)
+     // 4. 릴레이 핀 토글 (GPIO 확인)
+
+     #define RELAY_PIN D1      // GPIO5
+     #define LED_PIN LED_BUILTIN  // 내장 LED (보통 GPIO2)
+
+     unsigned long lastBlink = 0;
+     unsigned long lastStatus = 0;
+     bool ledState = false;
+     int counter = 0;
+
+     void setup() {
+       pinMode(LED_PIN, OUTPUT);
+       pinMode(RELAY_PIN, OUTPUT);
+
+       digitalWrite(LED_PIN, HIGH);    // LED OFF (active low)
+       digitalWrite(RELAY_PIN, LOW);   // Relay OFF
+
+       // 여러 baud rate로 시도해볼 수 있도록 115200 사용
+       Serial.begin(115200);
+       delay(100);
+
+       // 부팅 메시지 - 여러번 출력
+       Serial.println();
+       Serial.println("=================================");
+       Serial.println("ESP8266 FULL TEST - BOOT OK");
+       Serial.println("=================================");
+       Serial.println("Commands: on, off, status, blink, relay");
+       Serial.println();
+
+       // LED 빠르게 3번 깜빡여서 부팅 완료 표시
+       for (int i = 0; i < 3; i++) {
+         digitalWrite(LED_PIN, LOW);  // ON
+         delay(100);
+         digitalWrite(LED_PIN, HIGH); // OFF
+         delay(100);
+       }
+     }
+
+     void loop() {
+       unsigned long now = millis();
+
+       // 1. LED 0.5초마다 깜빡임 (펌웨어 실행 중 표시)
+       if (now - lastBlink >= 500) {
+         lastBlink = now;
+         ledState = !ledState;
+         digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+       }
+
+       // 2. 3초마다 자동으로 상태 출력 (TX 테스트)
+       if (now - lastStatus >= 3000) {
+         lastStatus = now;
+         counter++;
+         Serial.print("[AUTO] alive #");
+         Serial.print(counter);
+         Serial.print(" | relay=");
+         Serial.println(digitalRead(RELAY_PIN) ? "ON" : "OFF");
+       }
+
+       // 3. 시리얼 입력 처리 (RX 테스트)
+       if (Serial.available()) {
+         String cmd = Serial.readStringUntil('\n');
+         cmd.trim();
+         cmd.toLowerCase();
+
+         Serial.print("[RX] got: '");
+         Serial.print(cmd);
+         Serial.println("'");
+
+         if (cmd == "on") {
+           digitalWrite(RELAY_PIN, HIGH);
+           Serial.println("[OK] relay ON");
+         }
+         else if (cmd == "off") {
+           digitalWrite(RELAY_PIN, LOW);
+           Serial.println("[OK] relay OFF");
+         }
+         else if (cmd == "status") {
+           Serial.print("[STATUS] relay=");
+           Serial.println(digitalRead(RELAY_PIN) ? "ON" : "OFF");
+         }
+         else if (cmd == "blink") {
+           Serial.println("[OK] fast blink 5 times");
+           for (int i = 0; i < 5; i++) {
+             digitalWrite(LED_PIN, LOW);
+             delay(50);
+             digitalWrite(LED_PIN, HIGH);
+             delay(50);
+           }
+         }
+         else if (cmd == "relay") {
+           // 릴레이 토글 테스트
+           Serial.println("[OK] relay toggle test");
+           digitalWrite(RELAY_PIN, HIGH);
+           delay(500);
+           digitalWrite(RELAY_PIN, LOW);
+           Serial.println("[OK] relay toggle done");
+         }
+         else if (cmd.length() > 0) {
+           Serial.print("[ERR] unknown: ");
+           Serial.println(cmd);
+           Serial.println("Commands: on, off, status, blink, relay");
+         }
+       }
+     }
